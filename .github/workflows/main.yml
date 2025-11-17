@@ -8,33 +8,139 @@ on:
 jobs:
   sync-to-production:
     runs-on: ubuntu-latest
+    
     steps:
+      - name: Verify all secrets are set
+        run: |
+          echo "=== Checking Secrets ==="
+          
+          # Check PROD_REPO_ACCESS_TOKEN
+          TOKEN="${{ secrets.PROD_REPO_ACCESS_TOKEN }}"
+          if [ -z "$TOKEN" ]; then
+            echo "❌ PROD_REPO_ACCESS_TOKEN is empty"
+            exit 1
+          fi
+          echo "✅ Token is set (length: ${#TOKEN} chars)"
+          
+          # Check PROD_REPO_URL
+          URL="${{ secrets.PROD_REPO_URL }}"
+          if [ -z "$URL" ]; then
+            echo "❌ PROD_REPO_URL is empty"
+            exit 1
+          fi
+          echo "✅ URL is set: $URL"
+          
+          # Verify URL format
+          if [[ "$URL" == https://* ]]; then
+            echo "❌ ERROR: URL should NOT start with https://"
+            echo "   Remove 'https://' from PROD_REPO_URL secret"
+            exit 1
+          fi
+          
+          if [[ "$URL" != *.git ]]; then
+            echo "⚠️  WARNING: URL should end with .git"
+            echo "   Current: $URL"
+            echo "   Expected: ${URL}.git"
+          fi
+          
+          # Check MODULE_PATH
+          PATH_VAR="${{ secrets.MODULE_PATH }}"
+          if [ -z "$PATH_VAR" ]; then
+            echo "❌ MODULE_PATH is empty"
+            exit 1
+          fi
+          echo "✅ Module path is set: $PATH_VAR"
+          
+          echo "=== All checks passed ==="
+      
       - name: Checkout developer repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          path: source-repo
           
       - name: Configure Git
         run: |
-          git config user.name "GitHub Actions Bot"
-          git config user.email "actions@github.com"
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "actions@github.com"
           
-      - name: Push to Production Repository
+      - name: Clone production repository
         env:
           PROD_REPO_TOKEN: ${{ secrets.PROD_REPO_ACCESS_TOKEN }}
           PROD_REPO_URL: ${{ secrets.PROD_REPO_URL }}
+        run: |
+          echo "Cloning from: https://x-access-token:***@${PROD_REPO_URL}"
+          
+          # Clone with better error handling
+          if ! git clone "https://x-access-token:${PROD_REPO_TOKEN}@${PROD_REPO_URL}" prod-repo; then
+            echo "❌ Clone failed. Possible issues:"
+            echo "   1. Token doesn't have access to repository"
+            echo "   2. Repository doesn't exist"
+            echo "   3. Token is expired or invalid"
+            echo "   4. URL format is incorrect"
+            exit 1
+          fi
+          
+          echo "✅ Clone successful"
+          
+      - name: Setup dev branch
+        working-directory: ./prod-repo
+        run: |
+          # Check if dev branch exists remotely
+          if git ls-remote --heads origin dev | grep -q dev; then
+            echo "Dev branch exists, checking out..."
+            git checkout dev
+          else
+            echo "Dev branch doesn't exist, creating..."
+            git checkout -b dev
+          fi
+          
+          echo "Current branch: $(git branch --show-current)"
+          
+      - name: Sync module to production
+        env:
           MODULE_PATH: ${{ secrets.MODULE_PATH }}
         run: |
-          # Clone production repository
-          git clone https://x-access-token:${PROD_REPO_TOKEN}@${PROD_REPO_URL} prod-repo
           cd prod-repo
-          git checkout dev
           
-          # Copy module files to correct path
-          mkdir -p ${MODULE_PATH}
-          rsync -av --delete ../. ${MODULE_PATH}/ --exclude '.git' --exclude 'prod-repo'
+          echo "Syncing to: ${MODULE_PATH}"
           
-          # Commit and push changes
+          # Create module directory
+          mkdir -p "${MODULE_PATH}"
+          
+          # Remove old content
+          rm -rf "${MODULE_PATH:?}"/*
+          
+          # Copy new content (exclude .git and prod-repo)
+          rsync -av --delete \
+            --exclude '.git' \
+            --exclude '.github' \
+            --exclude 'prod-repo' \
+            ../source-repo/ "${MODULE_PATH}/"
+          
+          echo "✅ Files synced to ${MODULE_PATH}"
+          
+      - name: Commit and push changes
+        working-directory: ./prod-repo
+        run: |
           git add .
-          git commit -m "Auto-sync: ${GITHUB_REPOSITORY} - ${GITHUB_SHA::7}" || echo "No changes to commit"
+          
+          # Check for changes
+          if git diff --staged --quiet; then
+            echo "ℹ️  No changes to commit"
+            exit 0
+          fi
+          
+          # Commit changes
+          git commit -m "Auto-sync: ${{ github.repository }}" \
+                     -m "" \
+                     -m "Source commit: ${{ github.sha }}" \
+                     -m "Author: ${{ github.actor }}" \
+                     -m "Branch: ${{ github.ref_name }}" \
+                     -m "Message: ${{ github.event.head_commit.message }}"
+          
+          # Push changes
+          echo "Pushing to production repository..."
           git push origin dev
+          
+          echo "✅ Successfully synced to production repository"
