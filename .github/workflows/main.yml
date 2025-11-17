@@ -1,0 +1,40 @@
+name: Sync to Production Repository
+
+on:
+  push:
+    branches:
+      - dev
+
+jobs:
+  sync-to-production:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout developer repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+          
+      - name: Configure Git
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+          
+      - name: Push to Production Repository
+        env:
+          PROD_REPO_TOKEN: ${{ secrets.PROD_REPO_ACCESS_TOKEN }}
+          PROD_REPO_URL: ${{ secrets.PROD_REPO_URL }}
+          MODULE_PATH: ${{ secrets.MODULE_PATH }}
+        run: |
+          # Clone production repository
+          git clone https://x-access-token:${PROD_REPO_TOKEN}@${PROD_REPO_URL} prod-repo
+          cd prod-repo
+          git checkout dev
+          
+          # Copy module files to correct path
+          mkdir -p ${MODULE_PATH}
+          rsync -av --delete ../. ${MODULE_PATH}/ --exclude '.git' --exclude 'prod-repo'
+          
+          # Commit and push changes
+          git add .
+          git commit -m "Auto-sync: ${GITHUB_REPOSITORY} - ${GITHUB_SHA::7}" || echo "No changes to commit"
+          git push origin dev
